@@ -1,0 +1,9 @@
+# Notebooks do Framework
+
+## Lista de Notebooks
+
+1. `01_exploracao_e_jurimetria.ipynb` - Análise exploratória e indicadores
+2. `02_modelagem_classificacao.ipynb` - Classificação de procedência
+3. `03_modelagem_regressao.ipynb` - Regressão (tempo e valor)
+4. `04_explicabilidade_modelos.ipynb` - SHAP e LIME
+5. `05_dashboard_streamlit.py` - Dashboard interativo
