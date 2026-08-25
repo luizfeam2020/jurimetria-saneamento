@@ -1,527 +1,236 @@
 """
-Notebook 5: Dashboard Interativo - Framework de Jurimetria e Análise Preditiva
-Framework de Suporte à Decisão - Saneamento Básico
-Mestrado Profissionalizante - CASAN
+Dashboard Streamlit — Jurimetria aplicada ao saneamento básico
 
-Para executar: streamlit run 05_dashboard_streamlit.py
+Aplicação demonstrativa, autocontida e baseada exclusivamente em dados sintéticos.
+Os resultados não representam processos reais, não constituem decisão jurídica e
+não substituem análise profissional, contraditório ou revisão humana.
+
+Execução no Windows, a partir da raiz do projeto:
+    streamlit run notebooks\\05_dashboard_streamlit.py
+
+Caso este arquivo esteja na raiz:
+    streamlit run 05_dashboard_streamlit.py
 """
 
-import streamlit as st
-import pandas as pd
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+from typing import Any
+
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
+import streamlit as st
+from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix
-import xgboost as xgb
-import warnings
-warnings.filterwarnings('ignore')
+from sklearn.inspection import permutation_importance
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
 
-# =============================================
-# CONFIGURAÇÃO DA PÁGINA
-# =============================================
-st.set_page_config(
-    page_title="Jurimetria Saneamento - Dashboard",
-    page_icon="💧",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+try:
+    import shap
+except ImportError:  # SHAP é opcional para manter o dashboard executável.
+    shap = None
 
-# =============================================
-# TÍTULO E DESCRIÇÃO
-# =============================================
-st.title("💧 Framework de Jurimetria e Análise Preditiva")
-st.markdown("""
-**Tese:** Inteligência Artificial Aplicada à Gestão Estratégica de Litígios em Empresas Públicas de Saneamento Básico  
-**Empresa:** Companhia Catarinense de Águas e Saneamento (CASAN)  
-**Dados:** Sintéticos (simulação para protótipo acadêmico)
-""")
+RANDOM_STATE = 42
 
-# =============================================
-# SIDEBAR - FILTROS GLOBAIS
-# =============================================
-st.sidebar.header("🔍 Filtros Globais")
+NUMERIC_FEATURES = [
+    "valor_causa", "numero_audiencias", "numero_pericias",
+    "numero_recursos", "ano_distribuicao", "mes_distribuicao",
+]
+CATEGORICAL_FEATURES = [
+    "classe", "assunto_principal", "tribunal", "comarca",
+    "tipo_parte_autora", "tipo_parte_reu", "tipo_demanda",
+    "assunto_saneamento", "regiao_geografica",
+]
+FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
-# Gerar dados sintéticos (cacheado)
+
 @st.cache_data
-def gerar_dados_sinteticos(n_processos=10000, seed=42):
-    """Gera dados sintéticos simulando a view VW_JURIMETRIA_SANEAMENTO"""
-    np.random.seed(seed)
 
-    assuntos = ['AGUA', 'ESGOTO', 'DRENAGEM', 'RESIDUOS', 'TARIFA', 
-                'QUALIDADE', 'INTERRUPCAO', 'DANO_AMBIENTAL']
-    tipos_demanda = ['INDIVIDUAL', 'COLETIVA', 'ACAO_CIVIL_PUBLICA', 'MANDADO_SEGURANCA']
-    tribunais = ['TJSC', 'STJ', 'STF', 'TRF4']
-    resultados = ['PROCEDENTE', 'IMPROCEDENTE', 'PARCIALMENTE_PROCEDENTE', 'EXTINTO']
-    comarcas = ['Florianópolis', 'Joinville', 'Blumenau', 'São José', 
-                'Criciúma', 'Lages', 'Chapecó', 'Itajaí']
-    regioes = ['GRANDE_FLORIANOPOLIS', 'NORTE', 'SUL', 'OESTE', 'VALE_ITAJAI']
-
-    data = {
-        'id_processo': range(1, n_processos + 1),
-        'numero_unico': [f'{np.random.randint(1000000, 9999999)}-{np.random.randint(10, 99)}.{np.random.randint(2015, 2024)}.{np.random.choice([4, 8, 24])}.{np.random.randint(1, 9)}.{np.random.randint(1000, 9999)}' for _ in range(n_processos)],
-        'classe': np.random.choice(['Procedimento Comum', 'Procedimento Sumário', 'Mandado de Segurança', 'Ação Civil Pública', 'Recurso'], n_processos),
-        'assunto_principal': np.random.choice(assuntos, n_processos),
-        'valor_causa': np.random.lognormal(mean=8, sigma=1.5, size=n_processos),
-        'data_distribuicao': pd.date_range(start='2015-01-01', end='2024-12-31', periods=n_processos),
-        'tribunal': np.random.choice(tribunais, n_processos),
-        'comarca': np.random.choice(comarcas, n_processos),
-        'tipo_parte_autora': np.random.choice(['CONSUMIDOR', 'EMPRESA', 'ORGAO_PUBLICO', 'MP'], n_processos, p=[0.6, 0.2, 0.1, 0.1]),
-        'tipo_parte_reu': np.random.choice(['CONCESSIONARIA', 'MUNICIPIO', 'ESTADO'], n_processos, p=[0.7, 0.2, 0.1]),
-        'resultado_sentenca': np.random.choice(resultados, n_processos, p=[0.35, 0.25, 0.25, 0.15]),
-        'valor_condenacao': np.random.lognormal(mean=7, sigma=2, size=n_processos) * np.random.choice([0, 1], n_processos, p=[0.3, 0.7]),
-        'valor_acordo': np.random.lognormal(mean=6, sigma=1.5, size=n_processos) * np.random.choice([0, 1], n_processos, p=[0.8, 0.2]),
-        'tempo_total_dias': np.random.exponential(scale=365, size=n_processos).astype(int),
-        'numero_audiencias': np.random.poisson(lam=2, size=n_processos),
-        'numero_pericias': np.random.poisson(lam=0.5, size=n_processos),
-        'numero_recursos': np.random.poisson(lam=1, size=n_processos),
-        'tipo_demanda': np.random.choice(tipos_demanda, n_processos, p=[0.5, 0.3, 0.1, 0.1]),
-        'assunto_saneamento': np.random.choice(assuntos, n_processos),
-        'regiao_geografica': np.random.choice(regioes, n_processos)
-    }
-
-    df = pd.DataFrame(data)
-
-    # Feature engineering
-    df['ano_distribuicao'] = df['data_distribuicao'].dt.year
-    df['mes_distribuicao'] = df['data_distribuicao'].dt.month
-    df['trimestre_distribuicao'] = df['data_distribuicao'].dt.quarter
-    df['flag_acordo'] = (df['valor_acordo'] > 0).astype(int)
-    df['target_procedencia'] = df['resultado_sentenca'].map({
-        'PROCEDENTE': 1, 'IMPROCEDENTE': 0, 
-        'PARCIALMENTE_PROCEDENTE': 0.5, 'EXTINTO': np.nan
+def gerar_dados_sinteticos(n_processos: int = 3000, random_state: int = RANDOM_STATE) -> pd.DataFrame:
+    """Gera uma base artificial reproduzível para demonstração do fluxo."""
+    rng = np.random.default_rng(random_state)
+    assuntos = ["AGUA", "ESGOTO", "DRENAGEM", "RESIDUOS", "TARIFA", "QUALIDADE", "INTERRUPCAO", "DANO_AMBIENTAL"]
+    datas = pd.date_range("2015-01-01", "2024-12-31", periods=n_processos)
+    df = pd.DataFrame({
+        "id_processo": np.arange(1, n_processos + 1),
+        "classe": rng.choice(["Procedimento Comum", "Procedimento Sumário", "Mandado de Segurança", "Ação Civil Pública", "Recurso"], n_processos),
+        "assunto_principal": rng.choice(assuntos, n_processos),
+        "valor_causa": rng.lognormal(8, 1.5, n_processos).round(2),
+        "data_distribuicao": datas,
+        "tribunal": rng.choice(["TJSC", "STJ", "STF", "TRF4"], n_processos),
+        "comarca": rng.choice(["Florianópolis", "Joinville", "Blumenau", "São José", "Criciúma", "Lages", "Chapecó", "Itajaí"], n_processos),
+        "tipo_parte_autora": rng.choice(["CONSUMIDOR", "EMPRESA", "ORGAO_PUBLICO", "MP"], n_processos, p=[.6, .2, .1, .1]),
+        "tipo_parte_reu": rng.choice(["CONCESSIONARIA", "MUNICIPIO", "ESTADO"], n_processos, p=[.7, .2, .1]),
+        "tipo_demanda": rng.choice(["INDIVIDUAL", "COLETIVA", "ACAO_CIVIL_PUBLICA", "MANDADO_SEGURANCA"], n_processos, p=[.5, .3, .1, .1]),
+        "assunto_saneamento": rng.choice(assuntos, n_processos),
+        "regiao_geografica": rng.choice(["GRANDE_FLORIANOPOLIS", "NORTE", "SUL", "OESTE", "VALE_ITAJAI"], n_processos),
+        "tempo_total_dias": rng.exponential(365, n_processos).astype(int),
+        "numero_audiencias": rng.poisson(2, n_processos),
+        "numero_pericias": rng.poisson(.5, n_processos),
+        "numero_recursos": rng.poisson(1, n_processos),
     })
-
+    df["ano_distribuicao"] = df["data_distribuicao"].dt.year
+    df["mes_distribuicao"] = df["data_distribuicao"].dt.month
+    sinal = (.8 * (df["assunto_principal"] == "DANO_AMBIENTAL") + .6 * (df["tipo_parte_autora"] == "MP") + .4 * (df["tipo_demanda"] == "ACAO_CIVIL_PUBLICA") + .25 * (df["valor_causa"] > df["valor_causa"].median()) + rng.normal(0, .7, n_processos))
+    df["target_procedencia"] = (sinal > .65).astype(int)
+    df["resultado_sentenca"] = np.where(df["target_procedencia"].eq(1), "PROCEDENTE", "IMPROCEDENTE")
     return df
 
-# Carregar dados
-df = gerar_dados_sinteticos()
 
-# Filtros na sidebar
-st.sidebar.subheader("📅 Período")
-ano_min = int(df['ano_distribuicao'].min())
-ano_max = int(df['ano_distribuicao'].max())
-anos_selecionados = st.sidebar.slider(
-    "Selecione o período:",
-    min_value=ano_min,
-    max_value=ano_max,
-    value=(ano_min, ano_max)
-)
+@st.cache_resource
 
-st.sidebar.subheader("🏛️ Tribunal")
-tribunal_selecionado = st.sidebar.multiselect(
-    "Selecione o(s) tribunal(is):",
-    options=df['tribunal'].unique(),
-    default=df['tribunal'].unique()
-)
+def treinar_modelo(df: pd.DataFrame) -> Pipeline:
+    """Treina um modelo demonstrativo sem usar o resultado como preditor."""
+    preprocessor = ColumnTransformer([
+        ("num", "passthrough", NUMERIC_FEATURES),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL_FEATURES),
+    ])
+    pipeline = Pipeline([
+        ("preprocessamento", preprocessor),
+        ("modelo", RandomForestClassifier(n_estimators=180, max_depth=10, random_state=RANDOM_STATE, n_jobs=-1, class_weight="balanced")),
+    ])
+    pipeline.fit(df[FEATURE_COLUMNS], df["target_procedencia"])
+    return pipeline
 
-st.sidebar.subheader("📋 Assunto")
-assunto_selecionado = st.sidebar.multiselect(
-    "Selecione o(s) assunto(s):",
-    options=df['assunto_saneamento'].unique(),
-    default=df['assunto_saneamento'].unique()
-)
 
-st.sidebar.subheader("⚖️ Resultado")
-resultado_selecionado = st.sidebar.multiselect(
-    "Selecione o(s) resultado(s):",
-    options=df['resultado_sentenca'].unique(),
-    default=df['resultado_sentenca'].unique()
-)
+def avaliar_modelo(df: pd.DataFrame, pipeline: Pipeline) -> dict[str, float]:
+    pred = pipeline.predict(df[FEATURE_COLUMNS])
+    prob = pipeline.predict_proba(df[FEATURE_COLUMNS])[:, 1]
+    return {
+        "Acurácia": accuracy_score(df["target_procedencia"], pred),
+        "Precisão": precision_score(df["target_procedencia"], pred, zero_division=0),
+        "Recall": recall_score(df["target_procedencia"], pred, zero_division=0),
+        "F1-score": f1_score(df["target_procedencia"], pred, zero_division=0),
+        "AUC-ROC": roc_auc_score(df["target_procedencia"], prob),
+    }
 
-# Aplicar filtros
-df_filtrado = df[
-    (df['ano_distribuicao'].between(anos_selecionados[0], anos_selecionados[1])) &
-    (df['tribunal'].isin(tribunal_selecionado)) &
-    (df['assunto_saneamento'].isin(assunto_selecionado)) &
-    (df['resultado_sentenca'].isin(resultado_selecionado))
-]
 
-st.sidebar.markdown("---")
-st.sidebar.markdown(f"**Processos filtrados:** {len(df_filtrado)}")
-st.sidebar.markdown("**Dados:** Sintéticos (protótipo acadêmico)")
+def formatar_reais(valor: float) -> str:
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-# =============================================
-# PREPARAÇÃO DO MODELO (cacheado)
-# =============================================
-@st.cache_data
-def treinar_modelo(df):
-    """Treina modelo XGBoost para predição de procedência"""
-    df_modelo = df.dropna(subset=['target_procedencia']).copy()
-    y_binary = (df_modelo['target_procedencia'] >= 0.5).astype(int)
 
-    feature_cols = ['valor_causa', 'tempo_total_dias', 'numero_audiencias', 
-                    'numero_pericias', 'numero_recursos', 'ano_distribuicao', 'mes_distribuicao']
-    cat_cols = ['tribunal', 'comarca', 'tipo_parte_autora', 'tipo_parte_reu', 
-                'assunto_saneamento', 'tipo_demanda', 'classe', 'regiao_geografica']
+def aplicar_filtros(df: pd.DataFrame) -> pd.DataFrame:
+    st.sidebar.header("Filtros da análise")
+    tribunais = st.sidebar.multiselect("Tribunal", sorted(df["tribunal"].unique()), default=sorted(df["tribunal"].unique()))
+    assuntos = st.sidebar.multiselect("Assunto", sorted(df["assunto_principal"].unique()), default=sorted(df["assunto_principal"].unique()))
+    regioes = st.sidebar.multiselect("Região", sorted(df["regiao_geografica"].unique()), default=sorted(df["regiao_geografica"].unique()))
+    anos = st.sidebar.slider("Ano de distribuição", int(df["ano_distribuicao"].min()), int(df["ano_distribuicao"].max()), (int(df["ano_distribuicao"].min()), int(df["ano_distribuicao"].max())))
+    filtrado = df[df["tribunal"].isin(tribunais) & df["assunto_principal"].isin(assuntos) & df["regiao_geografica"].isin(regioes) & df["ano_distribuicao"].between(*anos)].copy()
+    st.sidebar.caption(f"{len(filtrado):,} processos selecionados")
+    return filtrado
 
-    for col in cat_cols:
-        le = LabelEncoder()
-        df_modelo[col + '_encoded'] = le.fit_transform(df_modelo[col].astype(str))
-        feature_cols.append(col + '_encoded')
 
-    X = df_modelo[feature_cols].copy()
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y_binary, test_size=0.2, random_state=42, stratify=y_binary
-    )
-
-    model = xgb.XGBClassifier(
-        n_estimators=100, max_depth=6, learning_rate=0.1, 
-        random_state=42, use_label_encoder=False, eval_metric='logloss'
-    )
-    model.fit(X_train, y_train)
-
-    y_pred = model.predict(X_test)
-    y_prob = model.predict_proba(X_test)[:, 1]
-
-    feature_importance = pd.DataFrame({
-        'feature': feature_cols,
-        'importance': model.feature_importances_
-    }).sort_values('importance', ascending=False)
-
-    return model, feature_importance, feature_cols, X_test, y_test, y_prob
-
-modelo, feature_importance, feature_cols, X_test, y_test, y_prob = treinar_modelo(df)
-
-# =============================================
-# ABAS DO DASHBOARD
-# =============================================
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 Visão Geral", 
-    "📈 Jurimetria", 
-    "🤖 Preditiva", 
-    "🔍 Explicabilidade",
-    "⚙️ Simulação"
-])
-
-# =============================================
-# ABA 1: VISÃO GERAL
-# =============================================
-with tab1:
-    st.header("📊 Visão Geral do Contencioso")
-
-    # Métricas principais em cards
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        total_processos = len(df_filtrado)
-        st.metric("Total de Processos", f"{total_processos:,}".replace(",", "."))
-
-    with col2:
-        taxa_procedencia = (df_filtrado['resultado_sentenca'] == 'PROCEDENTE').mean() * 100
-        st.metric("Taxa de Procedência", f"{taxa_procedencia:.1f}%")
-
-    with col3:
-        taxa_acordo = df_filtrado['flag_acordo'].mean() * 100
-        st.metric("Taxa de Acordo", f"{taxa_acordo:.1f}%")
-
-    with col4:
-        tempo_medio = df_filtrado['tempo_total_dias'].mean()
-        st.metric("Tempo Médio (dias)", f"{tempo_medio:.0f}")
-
-    st.markdown("---")
-
-    # Gráficos da visão geral
+def aba_visao_geral(df: pd.DataFrame) -> None:
+    st.subheader("Visão geral da base")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Processos", f"{len(df):,}")
+    c2.metric("Valor médio da causa", formatar_reais(df["valor_causa"].mean()))
+    c3.metric("Taxa sintética de procedência", f"{100 * df['target_procedencia'].mean():.1f}%")
+    c4.metric("Tempo mediano", f"{df['tempo_total_dias'].median():.0f} dias")
     col1, col2 = st.columns(2)
-
     with col1:
-        st.subheader("Evolução Anual")
-        serie_anual = df_filtrado.groupby('ano_distribuicao').size().reset_index(name='total')
-        fig = px.line(serie_anual, x='ano_distribuicao', y='total', 
-                      markers=True, title='Processos por Ano')
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
-
+        contagem = df["assunto_principal"].value_counts().rename_axis("Assunto").reset_index(name="Processos")
+        st.plotly_chart(px.bar(contagem, x="Processos", y="Assunto", orientation="h", title="Processos por assunto"), use_container_width=True)
     with col2:
-        st.subheader("Distribuição por Resultado")
-        resultado_counts = df_filtrado['resultado_sentenca'].value_counts().reset_index()
-        resultado_counts.columns = ['Resultado', 'Quantidade']
-        cores = {'PROCEDENTE': '#2ecc71', 'IMPROCEDENTE': '#e74c3c', 
-                 'PARCIALMENTE_PROCEDENTE': '#f39c12', 'EXTINTO': '#95a5a6'}
-        fig = px.pie(resultado_counts, values='Quantidade', names='Resultado',
-                     title='Resultados das Sentenças',
-                     color='Resultado', color_discrete_map=cores)
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
+        serie = df.groupby("ano_distribuicao", as_index=False)["id_processo"].count().rename(columns={"id_processo": "Processos"})
+        st.plotly_chart(px.line(serie, x="ano_distribuicao", y="Processos", markers=True, title="Distribuição anual"), use_container_width=True)
 
+
+def aba_perfil(df: pd.DataFrame) -> None:
+    st.subheader("Perfil dos processos")
     col1, col2 = st.columns(2)
-
     with col1:
-        st.subheader("Top 10 Comarcas")
-        top_comarcas = df_filtrado['comarca'].value_counts().head(10).reset_index()
-        top_comarcas.columns = ['Comarca', 'Quantidade']
-        fig = px.bar(top_comarcas, x='Quantidade', y='Comarca', orientation='h',
-                     title='Comarcas com Maior Volume',
-                     color='Quantidade', color_continuous_scale='Blues')
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
-
+        tabela = pd.crosstab(df["tribunal"], df["target_procedencia"], normalize="index").rename(columns={0: "Não procedente", 1: "Procedente"}).reset_index()
+        st.plotly_chart(px.bar(tabela, x="tribunal", y=["Não procedente", "Procedente"], barmode="stack", title="Resultado sintético por tribunal"), use_container_width=True)
     with col2:
-        st.subheader("Distribuição por Assunto")
-        assunto_counts = df_filtrado['assunto_saneamento'].value_counts().reset_index()
-        assunto_counts.columns = ['Assunto', 'Quantidade']
-        fig = px.bar(assunto_counts, x='Assunto', y='Quantidade',
-                     title='Processos por Assunto de Saneamento',
-                     color='Quantidade', color_continuous_scale='Viridis')
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(px.box(df, x="target_procedencia", y="valor_causa", color="target_procedencia", title="Distribuição do valor da causa"), use_container_width=True)
+    st.dataframe(df[["tribunal", "assunto_principal", "regiao_geografica", "target_procedencia"]].head(100), use_container_width=True, hide_index=True)
 
-# =============================================
-# ABA 2: JURIMETRIA
-# =============================================
-with tab2:
-    st.header("📈 Indicadores Jurimétricos")
 
-    col1, col2 = st.columns(2)
+def aba_modelagem(df: pd.DataFrame, pipeline: Pipeline) -> None:
+    st.subheader("Modelagem preditiva")
+    st.info("A previsão é experimental e foi treinada com dados sintéticos. Não use o resultado como decisão jurídica.")
+    metricas = avaliar_modelo(df, pipeline)
+    cols = st.columns(len(metricas))
+    for col, (nome, valor) in zip(cols, metricas.items()):
+        col.metric(nome, f"{valor:.3f}")
+    prob = pipeline.predict_proba(df[FEATURE_COLUMNS])[:, 1]
+    hist = pd.DataFrame({"Probabilidade sintética": prob})
+    st.plotly_chart(px.histogram(hist, x="Probabilidade sintética", nbins=25, title="Distribuição das probabilidades previstas"), use_container_width=True)
+    st.caption("As métricas são calculadas sobre a mesma base demonstrativa usada no treinamento e não representam validação de desempenho real.")
 
-    with col1:
-        st.subheader("Taxa de Procedência por Tribunal")
-        taxa_tribunal = df_filtrado.groupby('tribunal')['resultado_sentenca']\
-            .apply(lambda x: (x == 'PROCEDENTE').mean() * 100).reset_index()
-        taxa_tribunal.columns = ['Tribunal', 'Taxa (%)']
-        fig = px.bar(taxa_tribunal, x='Tribunal', y='Taxa (%)',
-                     title='Taxa de Procedência por Tribunal',
-                     color='Taxa (%)', color_continuous_scale='RdYlGn',
-                     text_auto='.1f')
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
 
-    with col2:
-        st.subheader("Tempo Médio por Tribunal")
-        tempo_tribunal = df_filtrado.groupby('tribunal')['tempo_total_dias'].mean().reset_index()
-        tempo_tribunal.columns = ['Tribunal', 'Tempo Médio (dias)']
-        fig = px.bar(tempo_tribunal, x='Tribunal', y='Tempo Médio (dias)',
-                     title='Tempo Médio de Tramitação por Tribunal',
-                     color='Tempo Médio (dias)', color_continuous_scale='Reds',
-                     text_auto='.0f')
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
+def aba_explicabilidade(df: pd.DataFrame, pipeline: Pipeline) -> None:
+    st.subheader("Explicabilidade")
+    st.info("As explicações indicam associações do modelo; não são justificativas jurídicas nem prova de causalidade.")
+    importances = permutation_importance(pipeline, df[FEATURE_COLUMNS], df["target_procedencia"], n_repeats=3, random_state=RANDOM_STATE, scoring="roc_auc", n_jobs=-1)
+    imp = pd.DataFrame({"Variável": FEATURE_COLUMNS, "Importância": importances.importances_mean}).sort_values("Importância", ascending=False).head(12)
+    st.plotly_chart(px.bar(imp.sort_values("Importância"), x="Importância", y="Variável", orientation="h", title="Importância aproximada por permutação"), use_container_width=True)
+    if shap is None:
+        st.warning("SHAP não está instalado. A explicabilidade por permutação permanece disponível; para SHAP, instale a dependência com: python -m pip install shap")
+    else:
+        st.success("A biblioteca SHAP está disponível. Para a execução completa das explicações SHAP detalhadas, utilize também o script 04_explicabilidade_modelos.py.")
 
-    st.markdown("---")
 
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Distribuição do Valor da Causa")
-        fig = px.box(df_filtrado, x='resultado_sentenca', y='valor_causa',
-                     title='Valor da Causa por Resultado',
-                     color='resultado_sentenca',
-                     color_discrete_map={'PROCEDENTE': '#2ecc71', 'IMPROCEDENTE': '#e74c3c',
-                                         'PARCIALMENTE_PROCEDENTE': '#f39c12', 'EXTINTO': '#95a5a6'})
-        fig.update_layout(height=400, yaxis_type='log')
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        st.subheader("Taxa de Acordo por Tipo de Demanda")
-        taxa_acordo_demanda = df_filtrado.groupby('tipo_demanda')['flag_acordo'].mean().reset_index()
-        taxa_acordo_demanda.columns = ['Tipo de Demanda', 'Taxa de Acordo']
-        fig = px.bar(taxa_acordo_demanda, x='Tipo de Demanda', y='Taxa de Acordo',
-                     title='Taxa de Acordo por Tipo de Demanda',
-                     color='Taxa de Acordo', color_continuous_scale='Teal',
-                     text_auto='.2%')
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("---")
-
-    st.subheader("📊 Tabela de Indicadores por Tribunal")
-    indicadores = df_filtrado.groupby('tribunal').agg({
-        'id_processo': 'count',
-        'resultado_sentenca': lambda x: (x == 'PROCEDENTE').mean(),
-        'flag_acordo': 'mean',
-        'tempo_total_dias': 'mean',
-        'valor_causa': 'mean',
-        'valor_condenacao': lambda x: x[x > 0].mean()
-    }).round(2)
-    indicadores.columns = ['Total', 'Tx Procedência', 'Tx Acordo', 
-                           'Tempo Médio', 'Valor Causa Médio', 'Valor Condenação Médio']
-    st.dataframe(indicadores, use_container_width=True)
-
-# =============================================
-# ABA 3: PREDITIVA
-# =============================================
-with tab3:
-    st.header("🤖 Modelagem Preditiva - Classificação")
-
-    st.markdown("""
-    ### Resultados do Modelo XGBoost
-
-    O modelo foi treinado para prever a probabilidade de **procedência** de um processo,
-    utilizando variáveis como valor da causa, tribunal, comarca, tipo de demanda e assunto.
-    """)
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        acuracia = accuracy_score(y_test, (y_prob >= 0.5).astype(int))
-        st.metric("Acurácia", f"{acuracia:.2%}")
-
-    with col2:
-        auc = roc_auc_score(y_test, y_prob)
-        st.metric("AUC-ROC", f"{auc:.3f}")
-
-    with col3:
-        st.metric("Amostras Teste", len(y_test))
-
-    st.markdown("---")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Feature Importance - Top 10")
-        fig = px.bar(feature_importance.head(10), x='importance', y='feature',
-                     orientation='h', title='Importância das Variáveis',
-                     color='importance', color_continuous_scale='Viridis')
-        fig.update_layout(height=500)
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        st.subheader("Distribuição das Probabilidades")
-        df_prob = pd.DataFrame({'Probabilidade': y_prob, 'Real': y_test})
-        fig = px.histogram(df_prob, x='Probabilidade', color='Real',
-                          title='Distribuição das Probabilidades Preditas',
-                          color_discrete_map={0: '#e74c3c', 1: '#2ecc71'},
-                          nbins=30, barmode='overlay')
-        fig.update_layout(height=500)
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("---")
-
-    st.subheader("📊 Matriz de Confusão")
-    cm = confusion_matrix(y_test, (y_prob >= 0.5).astype(int))
-    fig = px.imshow(cm, text_auto=True, color_continuous_scale='Blues',
-                    x=['Improcedente', 'Procedente'],
-                    y=['Improcedente', 'Procedente'],
-                    title='Matriz de Confusão - XGBoost')
-    fig.update_layout(height=400)
-    st.plotly_chart(fig, use_container_width=True)
-
-# =============================================
-# ABA 4: EXPLICABILIDADE
-# =============================================
-with tab4:
-    st.header("🔍 Explicabilidade das Predições")
-
-    st.markdown("""
-    ### Entendendo as Decisões do Modelo
-
-    Selecione um processo para ver quais fatores influenciaram a predição de procedência.
-    """)
-
-    # Selecionar processo para explicar
-    df_explicacao = df_filtrado.dropna(subset=['target_procedencia']).copy()
-
-    processo_idx = st.selectbox(
-        "Selecione o ID do Processo:",
-        options=df_explicacao['id_processo'].head(100).values,
-        format_func=lambda x: f"Processo #{x}"
-    )
-
-    if processo_idx:
-        processo = df_explicacao[df_explicacao['id_processo'] == processo_idx].iloc[0]
-
-        st.markdown("---")
+def aba_predicao(df: pd.DataFrame, pipeline: Pipeline) -> None:
+    st.subheader("Predição experimental de um novo caso")
+    st.warning("A saída é apenas demonstrativa, baseada em dados sintéticos, e exige revisão humana qualificada.")
+    with st.form("form_predicao"):
         col1, col2 = st.columns(2)
-
         with col1:
-            st.subheader("📋 Dados do Processo")
-            st.write(f"**Tribunal:** {processo['tribunal']}")
-            st.write(f"**Comarca:** {processo['comarca']}")
-            st.write(f"**Assunto:** {processo['assunto_saneamento']}")
-            st.write(f"**Tipo de Demanda:** {processo['tipo_demanda']}")
-            st.write(f"**Valor da Causa:** R$ {processo['valor_causa']:,.2f}")
-            st.write(f"**Parte Autora:** {processo['tipo_parte_autora']}")
-            st.write(f"**Parte Ré:** {processo['tipo_parte_reu']}")
-            st.write(f"**Resultado Real:** {processo['resultado_sentenca']}")
-
+            classe = st.selectbox("Classe", sorted(df["classe"].unique()))
+            assunto = st.selectbox("Assunto principal", sorted(df["assunto_principal"].unique()))
+            tribunal = st.selectbox("Tribunal", sorted(df["tribunal"].unique()))
+            comarca = st.selectbox("Comarca", sorted(df["comarca"].unique()))
+            valor = st.number_input("Valor da causa (R$)", min_value=0.0, value=float(df["valor_causa"].median()), step=100.0)
+            ano = st.number_input("Ano de distribuição", min_value=2015, max_value=2030, value=2026, step=1)
         with col2:
-            st.subheader("🤖 Predição do Modelo")
+            autora = st.selectbox("Tipo de parte autora", sorted(df["tipo_parte_autora"].unique()))
+            reu = st.selectbox("Tipo de parte ré", sorted(df["tipo_parte_reu"].unique()))
+            demanda = st.selectbox("Tipo de demanda", sorted(df["tipo_demanda"].unique()))
+            saneamento = st.selectbox("Assunto de saneamento", sorted(df["assunto_saneamento"].unique()))
+            regiao = st.selectbox("Região geográfica", sorted(df["regiao_geografica"].unique()))
+            audiencias = st.number_input("Número de audiências", min_value=0, value=2, step=1)
+            pericias = st.number_input("Número de perícias", min_value=0, value=0, step=1)
+            recursos = st.number_input("Número de recursos", min_value=0, value=1, step=1)
+        enviar = st.form_submit_button("Calcular previsão")
+    if enviar:
+        novo = pd.DataFrame([{"valor_causa": valor, "numero_audiencias": audiencias, "numero_pericias": pericias, "numero_recursos": recursos, "ano_distribuicao": ano, "mes_distribuicao": date.today().month, "classe": classe, "assunto_principal": assunto, "tribunal": tribunal, "comarca": comarca, "tipo_parte_autora": autora, "tipo_parte_reu": reu, "tipo_demanda": demanda, "assunto_saneamento": saneamento, "regiao_geografica": regiao}])
+        prob = float(pipeline.predict_proba(novo[FEATURE_COLUMNS])[0, 1])
+        st.metric("Probabilidade sintética estimada de procedência", f"{100 * prob:.1f}%")
+        st.progress(prob)
+        st.caption("Esta probabilidade não é uma conclusão sobre o caso e não deve orientar decisão automática.")
 
-            # Preparar features do processo
-            processo_features = {}
-            for col in feature_cols:
-                if col in processo.index:
-                    processo_features[col] = processo[col]
-                elif col.endswith('_encoded'):
-                    col_orig = col.replace('_encoded', '')
-                    if col_orig in processo.index:
-                        le = LabelEncoder()
-                        le.fit(df_explicacao[col_orig].astype(str))
-                        processo_features[col] = le.transform([str(processo[col_orig])])[0]
 
-            X_processo = pd.DataFrame([processo_features])
-            X_processo = X_processo[feature_cols]
-            prob_procedente = modelo.predict_proba(X_processo)[0][1]
+def main() -> None:
+    st.set_page_config(page_title="Jurimetria — Saneamento", page_icon="⚖️", layout="wide")
+    st.title("Framework de Jurimetria para Saneamento Básico")
+    st.caption("Dashboard demonstrativo com dados sintéticos — Avanço 2")
+    st.sidebar.markdown("### Status metodológico")
+    st.sidebar.warning("Demonstração acadêmica. Revisão humana obrigatória.")
+    df = gerar_dados_sinteticos()
+    filtrado = aplicar_filtros(df)
+    pipeline = treinar_modelo(df)
+    abas = st.tabs(["Visão geral", "Perfil dos processos", "Modelagem", "Explicabilidade", "Predição"])
+    with abas[0]:
+        aba_visao_geral(filtrado)
+    with abas[1]:
+        aba_perfil(filtrado)
+    with abas[2]:
+        aba_modelagem(filtrado if len(filtrado) > 20 else df, pipeline)
+    with abas[3]:
+        aba_explicabilidade(filtrado if len(filtrado) > 20 else df, pipeline)
+    with abas[4]:
+        aba_predicao(df, pipeline)
+    st.divider()
+    st.caption("Uso responsável: resultados sintéticos, finalidade acadêmica e apoio à análise — nunca decisão automatizada.")
 
-            st.metric("Probabilidade de Procedência", f"{prob_procedente:.1%}")
 
-            if prob_procedente >= 0.5:
-                st.error("🔴 Predição: PROCEDENTE")
-            else:
-                st.success("🟢 Predição: IMPROCEDENTE")
-
-        st.markdown("---")
-
-        # Explicação simplificada
-        st.subheader("📊 Fatores que Influenciaram a Decisão")
-
-        contribuicoes = []
-        for feat, imp in zip(feature_importance['feature'].values, feature_importance['importance'].values):
-            if feat in processo_features:
-                valor = processo_features[feat]
-                contrib = imp * (1 if valor > 0 else -1) * np.random.uniform(0.5, 1.5)
-                contribuicoes.append({
-                    'Feature': feat.replace('_encoded', ''),
-                    'Contribuição': contrib,
-                    'Valor': valor
-                })
-
-        df_contrib = pd.DataFrame(contribuicoes).sort_values('Contribuição', ascending=True)
-
-        fig = px.bar(df_contrib.tail(10), x='Contribuição', y='Feature', orientation='h',
-                     title='Contribuição das Features para a Decisão',
-                     color='Contribuição', color_continuous_scale='RdYlGn',
-                     text_auto='.3f')
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.info("""
-        **Como interpretar:**
-        - Barras **verdes** (positivas): features que aumentam a chance de PROCEDENTE
-        - Barras **vermelhas** (negativas): features que aumentam a chance de IMPROCEDENTE
-        - Quanto maior o valor absoluto, maior a influência na decisão
-        """)
-
-# =============================================
-# ABA 5: SIMULAÇÃO
-# =============================================
-with tab5:
-    st.header("⚙️ Simulação de Novos Processos")
-
-    st.markdown("""
-    ### Simule o Resultado de um Novo Processo
-
-    Preencha os dados abaixo para simular a probabilidade de procedência.
-    """)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        tribunal_sim = st.selectbox("Tribunal", options=df['tribunal'].unique())
-        comarca_sim = st.selectbox("Comarca", options=df['comarca'].unique())
-        assunto_sim = st.selectbox("Assunto de Saneamento", options=df['assunto_saneamento'].unique())
-        tipo_demanda_sim = st.selectbox("Tipo de Demanda", options=df['tipo_demanda'].unique())
-        classe_sim = st.selectbox("Classe Processual", options=df['classe'].unique())
-
-    with col2:
-        valor_causa_sim = st.number_input("Valor da Causa (R$)", min_value=100.0, max_value=1e7, value=10000.0, step=1000.0)
-        tipo_autor_sim = st.selectbox("Tipo de Parte Autora", options=df['tipo_parte_autora'].unique())
-        tipo_reu_sim = st.selectbox("Tipo de Parte Ré", options=df['tipo_parte_reu'].unique())
-        regiao_sim = st.selectbox("Reg
-
+if __name__ == "__main__":
+    main()
